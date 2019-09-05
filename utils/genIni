@@ -1,0 +1,429 @@
+#!/bin/sh
+# just a comment line\
+   exec tclsh8.4 "$0" "$@"
+
+#////////////////////////////////////////////////////////////////////////////
+#
+# Copyright (c) 2004 Mellanox Technologies LTD. All rights reserved.
+#
+# This software is available to you under a choice of one of two
+# licenses.  You may choose to be licensed under the terms of the GNU
+# General Public License (GPL) Version 2, available from the file
+# COPYING in the main directory of this source tree, or the
+# OpenIB.org BSD license below:
+#
+#     Redistribution and use in source and binary forms, with or
+#     without modification, are permitted provided that the following
+#     conditions are met:
+#
+#      - Redistributions of source code must retain the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer.
+#
+#      - Redistributions in binary form must reproduce the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer in the documentation and/or other materials
+#        provided with the distribution.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+#////////////////////////////////////////////////////////////////////////////
+
+# This program is generating INI file with multiple runs to 
+# fullfil a given experiment 
+
+# Usage:
+proc usage {} {
+   global argv0
+   puts "Usage: $argv0 \[-v\] <experiment file> <ini template file>"
+}
+
+proc help {} {
+	puts {
+                   GENERATE OMNET INI FILE
+                  -------------------------
+USAGE
+=====}
+
+	usage
+
+	puts {
+
+DESCRIPTION
+===========
+
+This utility expands the given "template" INI file by creating multiple
+"runs" that covers all combinations of variables as defined in the provided
+"experiment" definition file.
+
+The "template" INI is just a simple OMNET INI file that some of its parameters 
+are to be automatically replaced. As such their values appear in the file as
+with the following syntax: @VARNAME@.
+
+
+An example INI might be:
+**gen.srcLid = @GEN_SRC_LID@
+
+The key for generating multiple runs is the "experiment" file. This file
+is a TCL file which supports additional 4 functions: "vector", "dot", "cross" 
+and "experiment". 
+
+The flow of the program is to first process the experiment definition
+and to generate the different sets of values to be used the the different 
+runs. Then it parses the given INI file and replaces every variable with
+a single assignment (does not appear in the "experiment" but does have a single
+value assigned in "vector" statement) with its value. Other assignment
+statements for variables that their values changes in different runs are
+collected and added to the generated "runs".
+
+
+EXPERIMENT FILE SYNTAX
+======================
+
+1. vector VARNAME value
+-----------------------
+
+This will create a vector named VARNAME the given value (may be a string 
+a list or simple scalar). The result of this command is a TCL list of the 
+format: {VARNAME value1 value2 ...}
+
+Examples:
+set v1 [vector DST_LID {1 2 3 4 5 6}]
+=> {DST_LID 1 2 3 4 5 6}
+
+set v2 [vector STATIC_CREDITS 300]
+=> {STATIC_CREDITS 3}
+
+2. dot v1 v2 ... 
+-----------------
+
+Where v1, v2, etc  are results of "vector" or "cross" command
+
+This defines a scalar combination of values from the given vectors.
+For the "dot" to succeed the vector must be the same length. 
+The result for "dot $v1 $v2" is: 
+
+{ {VARNAME_1 VARNAME_2 } {v1[0] v2[0] } {v1[1] v2[1]} {v1[2] v2[2]} }
+
+Examples:
+
+set mtu  [vector MTU_CREDITS {18 34 66}]
+set obuf [vector OBUF_BYTES  [list [expr 18*64] [expr 34*64] [expr 66*64]]]
+
+set v1 [dot $mtu $obuf]
+=> {{MTU_CREDITS OBUF_BYTES} {18 1152} {34 2176} {66 4224}}
+
+3. cross v1 v2 v3 ...
+---------------------
+
+Where v1, v2, etc are results of "vector" or "dot" commands
+
+This defines the "tensoric multiplications" of the vectors.
+No requirements on the length of the vectors exists.
+
+set mtu   [vector MTU_CREDITS {18 34 66}]
+set obuf  [vector OBUF_BYTES  [list [expr 18*64] [expr 34*64] [expr 66*64]]]
+
+set v1    [dot $mtu $obuf]
+=> {{MTU_CREDITS OBUF_BYTES} {18 1152} {34 2176} {66 4224}}
+
+set ARAlg [vector AR_ALGO {"none" "random" "greedy random"}]
+
+set all   [cross $ARAlg $v1]
+=> { {AR_ALGO MTU_CREDITS OBUF_BYTES}
+	  {"none" 18 1152} {"none" 34 2176} {"none" 66 4224}
+	  {"random" 18 1152} {"random" 34 2176} {"random" 66 4224}
+	  {"greedy random" 18 1152} {"greedy random" 34 2176} 
+	    {"greedy random" 66 4224} }
+
+4. experiment name v
+----------------
+Sets the experiment to be performed to the given vector.
+'name' is to be used for the create INI file. 
+'v' shall be the result of "vector", "dot" or "cross" commands.
+
+}
+}
+
+###########################################################################
+
+#
+# Experiment file procedures
+# 
+
+proc isVector {v} {
+	global VARS
+
+	# must have at least 2 elements
+	if {[llength $v] < 2} {
+		return 0
+	}
+	
+	# first element must be a list of variables
+	foreach vn [lindex $v 0] {
+		if {![info exists VARS($vn)]} {
+			return 0
+		}
+	}
+	return 1
+}
+
+proc vector {name values} {
+	global VARS
+	if {[info exists VARS($name)]} {
+		error "vector named $name already exists"
+	}
+	set VARS($name) $values
+	set res $name
+	foreach v $values {
+		if {[llength $v] > 1} {
+			lappend res [list $v]
+		} else {
+			lappend res $v
+		}
+	}
+	return $res
+}
+
+proc dot args {
+	global VARS verbose
+
+	# check all given values are legal vectors of same length
+	foreach v $args {
+		if {! [isVector $v]} {
+			error "dot: given arg $v is not a \"vector\""
+		}
+		if {![info exists vLen]} {
+			set vLen [llength $v]
+		} else {
+			if {$vLen != [llength $v]} {
+				error "dot: arg $v does not have same length as previous args"
+			}
+		}
+	}
+
+	set res {}
+	for {set i 0} {$i < $vLen} {incr i} {
+		set values {}
+		foreach v $args {
+			lappend values [lindex $v $i]
+		}
+		lappend res $values
+	}
+	
+	return $res
+}
+
+proc cross args {
+	global VARS verbose
+
+	# check all given values are legal vectors
+	foreach v $args {
+		if {! [isVector $v]} {
+			error "cross: given arg $v is not a \"vector\""
+		}
+	}
+
+	if {[llength $args] < 2} {
+		error "cross: given less then 2 vectors"
+	}
+
+	set v0   [lindex $args 0]
+	set vars [lindex $v0 0]
+	set old  [lrange $v0 1 end]
+	
+	# go over all other vectors and create all combinations
+	for {set i 1} {$i < [llength $args]} {incr i} {
+		set new {}
+		set vx [lindex $args $i]
+		set vars [concat $vars [lindex $vx 0]]
+		set vals [lrange $vx 1 end]
+		foreach v $vals {
+			foreach o $old {
+				lappend new [concat $o $v]
+			}
+		}
+		set old $new
+	}
+
+	set res [concat [list $vars] $old] 
+	return $res
+}
+
+proc experiment {name v} {
+	global verbose VARS iniFile
+
+	if {! [isVector $v]} {
+		error "experiment: given arg $v is not a \"vector\""
+	}
+
+	set vars [lindex $v 0]
+	set runs [lrange $v 1 end]
+
+	# make sure all unreferred vars are consts
+	set consts {}
+	foreach v [array names VARS] {
+		if {[lsearch $vars $v] < 0} {
+			if {[llength $VARS($v)] > 2} {
+				puts "-W- Non const variable:$v not in experimemt"
+			} else {
+				lappend consts $v
+			}
+		}
+	}
+
+	if {$verbose} {
+		puts "-------------- EXPERIMENT $name ------------------"
+		puts "CONSTS: "
+		foreach v $consts {
+			puts "$v = [lindex $VARS($v) 1]"
+		}
+		puts ""
+		puts "TOTAL RUNS: [llength $runs]"
+		puts "VARS: $vars"
+		set idx 1
+		foreach r $runs {
+			puts "$idx: $r"
+			incr idx
+		}
+	}
+	
+	genIni $iniFile $name $consts $vars $runs
+	return
+}
+
+###########################################################################
+
+#
+# INI FILE PROCEDURES
+# 
+
+proc genIni {origIni name consts runVars runs} {
+	global VARS verbose
+	set runLines {}
+	set newF [open $name.ini w]
+	set oldF [open $origIni r]
+
+	puts "-------------- INI $name.ini  ------------------"
+
+	set lineNum 0
+	while {[gets $oldF sLine] >= 0} {
+		incr lineNum
+		if {[regexp {^(.*)@([^\s@]+)@(.*)} $sLine d1 pre var post]} {
+			# if the variable is a const
+			if {[lsearch $consts $var] >= 0} {
+				set nLine "${pre}$VARS($var)$post"
+				if {$verbose} {
+					puts "CONST: $nLine"
+				}
+				puts $newF $nLine
+			} else {
+				# must be in the runs....
+				if {[lsearch $runVars $var] < 0} {
+					error "unknown var:$var in line:$lineNum"
+				}
+				lappend runLines [list $var $pre $post]
+			}
+		} else {
+			puts $newF $sLine
+		}
+	}
+	close $oldF
+	
+	if {$verbose} {
+		foreach vPrePost $runLines {
+			foreach {v pre post} $vPrePost {break}
+			puts "RUN LINE: ${pre}@$v@$post"
+		}
+	}
+
+	set runIdx 0
+	foreach run $runs {
+		incr runIdx
+		puts $newF "\[Run $runIdx\]"
+		set runName ""
+		# prepare value map
+		for {set i 0} {$i < [llength $runVars]} {incr i} {
+			set v [lindex $runVars $i]
+			set val [lindex $run $i]
+			set RUN_VARS($v) $val
+			if {[llength $val] > 1} {
+				append runName "$v='$val' "
+			} else {
+				append runName "$v=$val "
+			}
+		}
+		
+		puts $newF "description=\"$runName\""
+		foreach vPrePost $runLines {
+			foreach {v pre post} $vPrePost {break}
+			puts $newF "${pre}$RUN_VARS($v)$post"
+		}
+		puts $newF " "
+	}
+
+	close $newF
+}
+
+###########################################################################
+
+#
+# MAIN FLOW
+# 
+
+if {[lsearch $argv "-h"] >= 0} {
+	help
+	exit
+}
+
+if {[llength $argv] < 2} {
+	usage
+	puts "Error: missing params"
+	exit 1
+}
+
+set verboseIdx [lsearch $argv "-v"]
+if {$verboseIdx >= 0} {
+	set verbose 1
+	set argv [lreplace $argv $verboseIdx $verboseIdx]
+} else {
+	set verbose 0
+}
+
+if {[llength $argv] > 2} {
+	usage
+	puts "Error: extra params:$argv"
+	exit 1
+}
+
+if {[llength $argv] < 2} {
+	usage
+	puts "Error: missing params:$argv"
+	exit 1
+}
+
+set expFile [lindex $argv 0]
+set iniFile [lindex $argv 1]
+
+set ef [open $expFile r]
+set expDef [read $ef]
+close $ef
+if {$verbose} {
+	puts "-------------- FILE $expFile ------------------"
+	puts ""
+	puts $expDef
+}
+
+if {[catch {eval $expDef} e]} {
+	puts "Error: bad experiment file. TCL error at:"
+	puts "$errorInfo"
+}
+
+exit 0

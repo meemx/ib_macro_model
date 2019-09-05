@@ -1,0 +1,8 @@
+This directory holds a 32 nodes fabric built with switched of radix 8 
+in 3 levels.
+
+The ned and the rest of the vector files were generated with utils/ibdm2ned.
+
+How to build?
+opp_makemake -f -I../../src -I../../utils -w -o is1_3l_32n_gui
+opp_makemake -f -I../../src -I../../utils -w -u cmdenv -o is1_3l_32n

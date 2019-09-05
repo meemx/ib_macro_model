@@ -1,0 +1,5 @@
+This directory holds a simple H1 <-> SW <-> H2
+
+How to build?
+opp_makemake -f -I../../src -I../../utils -w -o 2h_1s_gui
+opp_makemake -f -I../../src -I../../utils -w -u cmdenv -o 2h_1s

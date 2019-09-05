@@ -1,0 +1,8 @@
+vector OBUF_WIDTH 4
+set mtu   [vector MTU_CREDITS {18 34 66}]
+set obuf  [vector OBUF_BYTES  [list [expr 18*64] [expr 34*64] [expr 66*64]]]
+set v1    [dot $mtu $obuf]
+set ARAlg [vector DR_MODE {"DRDisabled" "DRSadp" "DRFf" "DRRandom"}]
+set all   [cross $ARAlg $v1]
+
+experiment "example1" $all

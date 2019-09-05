@@ -1,0 +1,315 @@
+#!/bin/sh
+# just a comment line\
+   exec ibdmsh "$0" "$@"
+
+#////////////////////////////////////////////////////////////////////////////
+#
+# Copyright (c) 2004 Mellanox Technologies LTD. All rights reserved.
+#
+# This software is available to you under a choice of one of two
+# licenses.  You may choose to be licensed under the terms of the GNU
+# General Public License (GPL) Version 2, available from the file
+# COPYING in the main directory of this source tree, or the
+# OpenIB.org BSD license below:
+#
+#     Redistribution and use in source and binary forms, with or
+#     without modification, are permitted provided that the following
+#     conditions are met:
+#
+#      - Redistributions of source code must retain the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer.
+#
+#      - Redistributions in binary form must reproduce the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer in the documentation and/or other materials
+#        provided with the distribution.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+#////////////////////////////////////////////////////////////////////////////
+
+# This program is doing a fabric init simulation and eventually
+# dump out the NED format for the fabric
+
+# Usage:
+proc usage {} {
+   global argv0
+   puts "Usage: $argv0 \[-v\] <ftree|osm> <topology file>"
+}
+
+proc assignLidsByTopology {fabric} {
+   set maxLid 0
+   foreach nameNNode [IBFabric_NodeByName_get $fabric] {
+      set name [lindex $nameNNode 0]
+      set node [lindex $nameNNode 1]
+      if {[regexp {H-([0-9]+)} $name d1 l]} {
+         set port [IBNode_getPort $node 1]
+         IBPort_base_lid_set $port $l
+         IBFabric_setLidPort $fabric $l $port
+         puts "-I- Set port:[IBPort_getName $port] lid:[IBPort_base_lid_get $port]"
+         if {$l > $maxLid} {set maxLid $l}
+      }
+   }
+
+   # now do the non HCAs
+   foreach nameNNode [IBFabric_NodeByName_get $fabric] {
+      set name [lindex $nameNNode 0]
+      set node [lindex $nameNNode 1]
+      if {![regexp {H-([0-9]+)} $name d1 l]} {
+         incr maxLid
+         set numPorts [IBNode_numPorts_get $node]
+         for {set pn 1} {$pn <= $numPorts} {incr pn} {
+            set port [IBNode_getPort $node $pn]
+            IBPort_base_lid_set $port $maxLid
+            IBFabric_setLidPort $fabric $maxLid $port
+            puts "-I- Set port:[IBPort_getName $port] lid:[IBPort_base_lid_get $port]"
+         }
+      }
+   }
+   IBFabric_maxLid_set $fabric $maxLid
+   return 0
+}
+
+#
+# DUMP Fabric into a NED file
+#
+proc dumpNed {fabric modName nedFileName} {
+	global IB_SW_NODE
+	
+	set f [open $nedFileName w]
+
+	puts $f "module $modName"
+	
+	# first we dump put submodules
+	puts $f "\tsubmodules:"
+	
+	set allNodes [IBFabric_NodeByName_get $fabric]
+	set numLids [expr [llength $allNodes] + 2]
+	foreach nameNNode $allNodes {
+		set oName [lindex $nameNNode 0]
+		regsub -all {[-/]} $oName "_" name
+		set node [lindex $nameNNode 1]
+		set type [IBNode_type_get $node]
+		set numPorts [IBNode_numPorts_get $node]
+		if {$type != $IB_SW_NODE} {
+			set port [IBNode_getPort $node 1]
+         set lid [IBPort_base_lid_get $port]
+			puts $f "\t\t$name:HCA; // LID $lid"
+		} else {
+			puts $f  "\t\t$name: Switch;"
+			puts $f  "\t\tparameters:"
+			puts $f  "\t\t\tnumSwitchPorts = $numPorts;"
+			puts $f  "\t\t\tgatesizes: out\[$numPorts\], in\[$numPorts\];"
+		}
+	}
+
+	# now do the connecttions (double sided is required !)
+	puts $f "\tconnections:"
+	foreach nameNNode $allNodes {
+		set oName [lindex $nameNNode 0]
+		regsub -all {[-/]} $oName "_" name
+		set node [lindex $nameNNode 1]
+		set type [IBNode_type_get $node]
+		set numPorts [IBNode_numPorts_get $node]
+		for {set pn 1} {$pn <= $numPorts} {incr pn} {
+			set port [IBNode_getPort $node $pn]
+			if {$port == ""} { continue }
+			set remPort [IBPort_p_remotePort_get $port]
+			if {$remPort == ""} { continue }
+			
+			set oRemName [IBNode_name_get [IBPort_p_node_get $remPort]]
+			regsub -all {[-/]} $oRemName "_" remName
+			set remPn [IBPort_num_get $remPort]
+			set n [expr $pn - 1]
+			set r [expr $remPn - 1]
+
+			if {[regexp {^H} $name]} {
+				set s ""
+			} else {
+				set s "\[$n\]"
+			}
+			if {[regexp {^H} $remName]} {
+				set k ""
+			} else {
+				set k "\[$r\]" 
+			}
+			puts $f "\t\t$name.out$s --> delay 5ns --> $remName.in$k;"
+		}
+	}
+	puts $f "endmodule\n"
+	
+	puts $f "network FABRIC : $modName"
+	puts $f "endnetwork"
+	close $f
+
+	puts "-I- Module $modName written into $nedFileName"
+}
+
+#
+# DUMP Fabric into a NED file
+#
+proc dumpFdbs {fabric modName iniFileName vecFileName} {
+	global IB_SW_NODE
+	
+	set f [open $iniFileName w]
+	set v [open $vecFileName w]
+	set idx 0
+	set allNodes [IBFabric_NodeByName_get $fabric]
+	set numLids 0
+	foreach nameNNode $allNodes {
+      if {[regexp {H-([0-9]+)} [lindex $nameNNode 0]]} {
+			incr numLids
+		}
+	}
+
+	set cut 256
+	foreach nameNNode $allNodes {
+		set oName [lindex $nameNNode 0]
+		regsub -all {[-/]} $oName "_" name
+		set node [lindex $nameNNode 1]
+		set type [IBNode_type_get $node]
+		set numPorts [IBNode_numPorts_get $node]
+		if {$type == $IB_SW_NODE} {
+			set fdb {}
+			set inFdbs [lrange [IBNode_LFT_get $node] 0 $numLids]
+			foreach p $inFdbs {
+				if {($p == 255) || ($p == 0)} {
+					set p 255
+				} else {
+					incr p -1
+				}
+				lappend fdb $p
+			}
+			puts $f  "**.$name.fdbIndex = $idx;"
+			for {set i 0 } { $i < [llength $fdb]} { incr i 100} {
+			  puts $v "$idx: [lrange $fdb $i [expr $i + 99]]"
+			}
+			incr idx
+
+			# Port Groups:
+			set upPorts {}
+			set rank [IBNode_rank_get $node]
+			if {$rank > 0} {
+				for {set pn 1} {$pn <= $numPorts} {incr pn} {
+					set port [IBNode_getPort $node $pn]
+					if {$port == ""} { continue }
+					set remPort [IBPort_p_remotePort_get $port]
+					if {$remPort == ""} { continue }
+					set remNode [IBPort_p_node_get $remPort]
+					set remRank [IBNode_rank_get $remNode]
+					if {$remRank < $rank} {
+						lappend upPorts [ expr {$pn -1}]
+					}
+				}
+			}
+			
+			if {[llength $upPorts]} {
+				puts $f "**.$name.DRGroups = \"$upPorts \""
+			} else {
+				puts $f "**.$name.DRGroups = \" \""
+			}
+		}
+	}
+
+	puts "-I- FDBS written into $vecFileName index into $iniFileName"
+	close $v
+   close $f
+}
+
+##############################################################################
+#
+# MAIN FLOW
+#
+set verboseArgIdx [lsearch $argv -v]
+if {$verboseArgIdx >= 0} {
+   set argv [lreplace $argv $verboseArgIdx $verboseArgIdx]
+}
+
+if {[llength $argv] != 2} {
+	usage
+	exit 1
+}
+
+set mode [lindex $argv 0]
+set topo [lindex $argv 1]
+set smNodeName "H-1/U1"
+set smPortNum 1
+set fabricName [file tail [file rootname $topo]]
+
+set fabric [new_IBFabric]
+
+if {[IBFabric_parseTopology $fabric $topo]} {
+	puts "-I- Fail to parse topo:$topo"
+	exit 1
+}
+	
+set smNode [IBFabric_getNode $fabric $smNodeName]
+if {$smNode == ""} {
+	puts "-I- Fail to find SM node:$smNodeName"
+	exit 1
+}
+	
+set smPort [IBNode_getPort $smNode $smPortNum]
+if {$smPort == ""} {
+	puts "-I- Fail to find SM Port:$smNodeName/$smPortNum"
+	exit 1
+}
+	
+# We can not simply use ibdmAssignLids since we need to have 
+# all HCA lids first for the sake of randomizing target LIDs...
+#if {[ibdmAssignLids $smPort]} {
+#	puts "-I- Fail to assign LIDs"
+#	exit 1
+#}
+# we try to assign the lids in HCA name order.
+# we assume we all HCAs are named H-<N>
+assignLidsByTopology $fabric
+
+set roots [ibdmFindSymmetricalTreeRoots $fabric]
+puts "-I- Got [llength $roots] roots: $roots"
+if {[ibdmRankFabricByRoots $fabric $roots]} {
+	puts "-E- fail to rank fabric"
+	exit 1
+}
+
+set savedVerbosity $FabricUtilsVerboseLevel
+if {$verboseArgIdx >= 0} {
+	set FabricUtilsVerboseLevel 0xff
+}
+
+if {$mode == "osm"} {
+	if {[ibdmCalcMinHopTables $fabric]} {
+		puts "-I- Fail to calculate MinHop tables"
+		exit 1
+	}
+	
+	if {[ibdmOsmRoute $fabric]} {
+		puts "-I- Fail to Route"
+		exit 1
+	}
+} else {
+	# match to tree:
+	if {[ibdmFatTreeAnalysis $fabric]} {
+		puts "-I- Fail to perform fat tree routing"
+		exit 1
+	}
+}
+
+if {[ibdmVerifyCAtoCARoutes $fabric]} {
+   puts "-I- Some missing CA to CA paths"
+   exit 1
+}
+
+dumpNed $fabric $fabricName "$fabricName.ned"
+dumpFdbs $fabric $fabricName "$fabricName.fdbs.ini" "$fabricName.fdbs"
+file copy -force $fabricName.fdbs $fabricName.dfdbs
+
+exit

@@ -1,0 +1,9 @@
+This directory tree hold an InfiniBand model with support for 
+IB flow control scheme, Arbitration over multiple VLs and routing 
+based on Linear Forwarding Tables.
+
+To run it:
+1. cd utils, make
+2. cd src, make
+Now select one of the networks let's say $n
+3. cd networks/$n, make, $n -f $n.ini

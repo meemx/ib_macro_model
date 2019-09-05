@@ -1,0 +1,12 @@
+This directory holds some utility classes and executables:
+
+genIni - tcl code to generate INI for an arbitrary experiment which vary many arguments (try -h)
+   example.exp - example experiemnt definition (which args and their values)
+   example.ini - master INI for the experiemnt
+
+ibdm2ned - convert IBDM topologyy to this model for simulation (generating NED and FDBs)
+
+Makefile
+
+vec_file.h - Definition of the  class supporting shared vectors of INT and FLOAT
+vec_file.cpp - Implementation of the class supporting shared vectors of INT and FLOAT

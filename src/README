@@ -1,0 +1,3 @@
+This directory holds the actual model code
+the modules.ini holds common parameters for the mode.
+I think we should have one for SDR one for DDR and one for QDR
